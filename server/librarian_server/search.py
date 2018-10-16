@@ -27,7 +27,7 @@ import time
 
 from flask import Response, flash, redirect, render_template, request, url_for
 
-from . import app, db, logger
+from . import app, db, is_primary_server, logger
 from .dbutil import NotNull, SQLAlchemyError
 from .webutil import ServerError, json_api, login_required, optional_arg, required_arg
 
@@ -486,8 +486,10 @@ def compile_search(search_string, query_type='files'):
                 .join(Store)
                 .join(File, isouter=True)
                 .filter(the_file_search_compiler.compile(search)))
-    elif query_type == 'instances-paths':
-        return FileInstance.query.filter(the_file_search_compiler.compile(search))
+    elif query_type == 'instances':
+        return (db.session.query(FileInstance)
+                .join(File, isouter=True)
+                .filter(the_file_search_compiler.compile(search)))
     else:
         raise ServerError('unhandled query_type %r', query_type)
 
@@ -681,6 +683,11 @@ the_standing_order_manager = StandingOrderManager()
 
 
 def queue_standing_order_copies():
+    # Only the primary server processes standing orders.
+    if not is_primary_server():
+        stord_logger.debug('not checking standing orders -- not primary server process')
+        return
+
     stord_logger.debug('queueing check of standing orders')
     the_standing_order_manager.queue_launch_copy()
 
@@ -907,7 +914,16 @@ def launch_stage_operation(user, search, stage_dest):
     for inst, file, store in info:
         n_bytes += file.size
 
-    stage_info = [(store.path_prefix, inst.parent_dirs, inst.name) for (inst, file, store) in info]
+    # Quasi-hack: don't try to stage multiple instances of the same
+    # file, since that will break if the "file" is a directory.
+    stage_info = []
+    seen_names = set()
+
+    for inst, file, store in info:
+        if inst.name not in seen_names:
+            seen_names.add(inst.name)
+            stage_info.append((store.path_prefix, inst.parent_dirs, inst.name))
+
     bgtasks.submit_background_task(StagerTask(
         dest, stage_info, n_bytes, user, lds_info['chown_command']))
 
@@ -1267,9 +1283,9 @@ def execute_search_api(args, sourcename=None):
     elif output_format == file_listing_json_format:
         query_type = 'files'
     elif output_format == instance_listing_json_format:
-        query_type = 'instances-paths'
+        query_type = 'instances'
     elif output_format == obs_listing_json_format:
-        query_typ = 'obs'
+        query_type = 'obs'
     else:
         raise ServerError('illegal search output type %r', output_format)
 
