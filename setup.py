@@ -25,4 +25,4 @@ setup_args = {
 }
 
 if __name__ == '__main__':
-    apply(setup, (), setup_args)
+    setup(*(), **setup_args)
